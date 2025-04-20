@@ -1,0 +1,10 @@
+Type in terminal:
+    1-g++ (Replace with File name).cpp -o (Replace with File name)
+    2-./(Replace with File name)
+
+
+Notes:
+
+if you changed any thing in your code Run these two lines again
+
+if you did not changed any thing in the code and wanted to Run again Run the second line only 
