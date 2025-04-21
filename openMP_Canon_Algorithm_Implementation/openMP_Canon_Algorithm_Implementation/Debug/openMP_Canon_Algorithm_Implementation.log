@@ -1,0 +1,5 @@
+﻿  openMP_Canon_Algorithm_Implementation.cpp
+C:\Users\ismail2001\source\repos\openMP_Canon_Algorithm_Implementation\openMP_Canon_Algorithm_Implementation\openMP_Canon_Algorithm_Implementation.cpp(68,9): warning C4849: OpenMP 'collapse' clause ignored in 'parallel for' directive
+C:\Users\ismail2001\source\repos\openMP_Canon_Algorithm_Implementation\openMP_Canon_Algorithm_Implementation\openMP_Canon_Algorithm_Implementation.cpp(79,9): warning C4849: OpenMP 'collapse' clause ignored in 'parallel for' directive
+C:\Users\ismail2001\source\repos\openMP_Canon_Algorithm_Implementation\openMP_Canon_Algorithm_Implementation\openMP_Canon_Algorithm_Implementation.cpp(91,9): warning C4849: OpenMP 'collapse' clause ignored in 'parallel for' directive
+  openMP_Canon_Algorithm_Implementation.vcxproj -> C:\Users\ismail2001\source\repos\openMP_Canon_Algorithm_Implementation\Debug\openMP_Canon_Algorithm_Implementation.exe
