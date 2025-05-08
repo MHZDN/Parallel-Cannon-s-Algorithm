@@ -19,21 +19,13 @@ void printMatrix(const vector<vector<int>>& mat, const string& name) {
     cout << "\n";
 }
 
-// Shift row left by blockSize (circular)
-void shiftRowLeft(vector<vector<int>>& mat, int row, int blockSize) {
-    vector<int> temp = mat[row];
-    for (int i = 0; i < N; i++) {
-        mat[row][i] = temp[(i + blockSize) % N];
+// Copy a block from source to destination
+void copyBlock(const vector<vector<int>>& src, vector<vector<int>>& dst, int srcRow, int srcCol, int dstRow, int dstCol, int blockSize) {
+    for (int i = 0; i < blockSize; ++i) {
+        for (int j = 0; j < blockSize; ++j) {
+            dst[dstRow + i][dstCol + j] = src[srcRow + i][srcCol + j];
+        }
     }
-}
-
-// Shift column up by blockSize (circular)
-void shiftColUp(vector<vector<int>>& mat, int col, int blockSize) {
-    vector<int> temp(N);
-    for (int i = 0; i < N; i++)
-        temp[i] = mat[i][col];
-    for (int i = 0; i < N; i++)
-        mat[i][col] = temp[(i + blockSize) % N];
 }
 
 int main() {
@@ -64,7 +56,7 @@ int main() {
     vector<vector<int>> B(N, vector<int>(N));
     vector<vector<int>> C(N, vector<int>(N, 0));
 
-    // Fill A and B with test values (e.g., A[i][j] = i + j, B[i][j] = i * j)
+    // Fill A and B with test values
 #pragma omp parallel for collapse(2)
     for (int i = 0; i < N; i++)
         for (int j = 0; j < N; j++) {
@@ -75,41 +67,81 @@ int main() {
     printMatrix(A, "Initial A");
     printMatrix(B, "Initial B");
 
-    // Initial skewing
-#pragma omp parallel for collapse(2)
-    for (int i = 0; i < q; i++) {
-        for (int j = 0; j < q; j++) {
-            shiftRowLeft(A, i * blockSize, j);
-            shiftColUp(B, j * blockSize, i);
-        }
-    }
-
     double start_time = omp_get_wtime();
 
-    // Main computation loop (q steps)
-    for (int step = 0; step < q; step++) {
-#pragma omp parallel for collapse(2) schedule(dynamic)
-        for (int bi = 0; bi < q; bi++) {
-            for (int bj = 0; bj < q; bj++) {
-                int rowStart = bi * blockSize;
-                int colStart = bj * blockSize;
-                for (int i = 0; i < blockSize; i++) {
-                    for (int j = 0; j < blockSize; j++) {
-                        int sum = 0;
-                        for (int k = 0; k < blockSize; k++) {
-                            sum += A[rowStart + i][(bj * blockSize + k) % N] *
-                                B[(bi * blockSize + k) % N][colStart + j];
-                        }
-                        C[rowStart + i][colStart + j] += sum;
-                    }
+    if (blockSize == 1) {
+        cout << "\nNote: blockSize = 1. Falling back to standard matrix multiplication.\n";
+#pragma omp parallel for collapse(2)
+        for (int i = 0; i < N; ++i) {
+            for (int j = 0; j < N; ++j) {
+                int sum = 0;
+                for (int k = 0; k < N; ++k) {
+                    sum += A[i][k] * B[k][j];
                 }
+                C[i][j] = sum;
+            }
+        }
+    }
+    else {
+        // Initial skewing using block-level shift
+        vector<vector<int>> A_skewed(N, vector<int>(N));
+        vector<vector<int>> B_skewed(N, vector<int>(N));
+
+        for (int i = 0; i < q; i++) {
+            for (int j = 0; j < q; j++) {
+                int srcRow = i * blockSize;
+                int srcCol = j * blockSize;
+
+                int dstACol = ((j + q - i) % q) * blockSize;
+                int dstBRow = ((i + q - j) % q) * blockSize;
+
+                copyBlock(A, A_skewed, srcRow, srcCol, srcRow, dstACol, blockSize);
+                copyBlock(B, B_skewed, srcRow, srcCol, dstBRow, srcCol, blockSize);
             }
         }
 
-#pragma omp parallel for
-        for (int i = 0; i < q; i++) {
-            shiftRowLeft(A, i * blockSize, 1);
-            shiftColUp(B, i * blockSize, 1);
+        A = A_skewed;
+        B = B_skewed;
+
+        // Main computation loop
+        for (int step = 0; step < q; step++) {
+#pragma omp parallel for collapse(2) schedule(dynamic)
+            for (int bi = 0; bi < q; bi++) {
+                for (int bj = 0; bj < q; bj++) {
+                    int rowStart = bi * blockSize;
+                    int colStart = bj * blockSize;
+                    for (int i = 0; i < blockSize; i++) {
+                        for (int j = 0; j < blockSize; j++) {
+                            int sum = 0;
+                            for (int k = 0; k < blockSize; k++) {
+                                sum += A[rowStart + i][(bj * blockSize + k)] *
+                                    B[(bi * blockSize + k)][colStart + j];
+                            }
+                            C[rowStart + i][colStart + j] += sum;
+                        }
+                    }
+                }
+            }
+
+            // Rotate A blocks left and B blocks up
+            vector<vector<int>> A_rotated(N, vector<int>(N));
+            vector<vector<int>> B_rotated(N, vector<int>(N));
+
+            for (int i = 0; i < q; i++) {
+                for (int j = 0; j < q; j++) {
+                    int srcRow = i * blockSize;
+                    int srcCol = j * blockSize;
+
+                    int dstACol = ((j + q - 1) % q) * blockSize;
+                    int dstBRow = ((i + q - 1) % q) * blockSize;
+
+                    copyBlock(A, A_rotated, srcRow, srcCol, srcRow, dstACol, blockSize);
+                    copyBlock(B, B_rotated, srcRow, srcCol, dstBRow, srcCol, blockSize);
+                }
+            }
+
+            A = A_rotated;
+            B = B_rotated;
         }
     }
 
