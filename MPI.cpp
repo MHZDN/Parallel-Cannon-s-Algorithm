@@ -1,145 +1,130 @@
+// Optimized version of Cannon's Algorithm using MPI
 #include <mpi.h>
 #include <iostream>
 #include <vector>
 #include <cmath>
 #include <cstdlib>
+#include <sstream>
 
 using namespace std;
 
-// Helper function to print a matrix
-void printMatrix(const vector<vector<int>>& mat, const string& name) {
+// Fills a flat matrix with a specific pattern for testing
+void fillMatrix(vector<int>& mat, int N, bool pattern = true) {
+    for (int i = 0; i < N; ++i)
+        for (int j = 0; j < N; ++j)
+            mat[i * N + j] = pattern ? (i + j) : (i * j);
+}
+
+// Basic matrix block multiplication: C += A x B
+void multiplyBlocks(const vector<int>& A, const vector<int>& B, vector<int>& C, int blockSize) {
+    for (int i = 0; i < blockSize; ++i)
+        for (int j = 0; j < blockSize; ++j)
+            for (int k = 0; k < blockSize; ++k)
+                C[i * blockSize + j] += A[i * blockSize + k] * B[k * blockSize + j];
+}
+
+// Neatly prints a flat matrix with given size
+void printMatrix(const vector<int>& mat, int N, const string& name) {
     cout << name << ":\n";
-    for (const auto& row : mat) {
-        for (int val : row)
-            cout << val << " ";
+    for (int i = 0; i < N; ++i) {
+        for (int j = 0; j < N; ++j)
+            cout << mat[i * N + j] << " ";
         cout << "\n";
     }
     cout << "\n";
 }
 
-// Helper function to fill a matrix
-// If pattern == true, fill with i + j
-// If pattern == false, fill with i * j
-void fillMatrix(vector<vector<int>>& mat, int N, bool pattern = true) {
-    for (int i = 0; i < N; ++i)
-        for (int j = 0; j < N; ++j)
-            mat[i][j] = pattern ? (i + j) : (i * j);
-}
-
-// Multiply two blocks (submatrices) and add the result into C
-void multiplyBlocks(const vector<vector<int>>& A, const vector<vector<int>>& B, vector<vector<int>>& C, int blockSize) {
-    for (int i = 0; i < blockSize; ++i)
-        for (int j = 0; j < blockSize; ++j)
-            for (int k = 0; k < blockSize; ++k)
-                C[i][j] += A[i][k] * B[k][j];
-}
-
 int main(int argc, char** argv) {
-    MPI_Init(&argc, &argv); // Initialize MPI environment
-
+    MPI_Init(&argc, &argv); // Initialize MPI
     int rank, size;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank); // Get current process ID (rank)
-    MPI_Comm_size(MPI_COMM_WORLD, &size); // Get total number of processes
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    int N; // Matrix size
+    int N; // Size of the full matrix (N x N)
     if (rank == 0) {
         cout << "Enter matrix size (N): ";
         cin >> N;
     }
-    MPI_Bcast(&N, 1, MPI_INT, 0, MPI_COMM_WORLD); // Broadcast N to all processes
+    MPI_Bcast(&N, 1, MPI_INT, 0, MPI_COMM_WORLD); // Share N with all processes
 
-    int q = sqrt(size); // q = number of blocks along a dimension (must be a perfect square)
+    int q = sqrt(size); // Processes arranged in a q x q grid
     if (q * q != size || N % q != 0) {
-        if (rank == 0) {
-            cerr << "Error: Number of processes must be a perfect square and N must be divisible by sqrt(P)." << endl;
-        }
+        if (rank == 0)
+            cerr << "Error: Number of processes must be a perfect square and N divisible by sqrt(P)." << endl;
         MPI_Finalize();
-        return 1; // Exit if invalid setup
+        return 1;
     }
 
-    int blockSize = N / q; // Size of each block
-    int row = rank / q;    // Row index of block
-    int col = rank % q;    // Column index of block
+    int blockSize = N / q;        // Size of each block (submatrix)
+    int row = rank / q;           // Process row in processor grid
+    int col = rank % q;           // Process column in processor grid
 
-    // Initialize local matrices
-    vector<vector<int>> A_block(blockSize, vector<int>(blockSize)); // Submatrix of A
-    vector<vector<int>> B_block(blockSize, vector<int>(blockSize)); // Submatrix of B
-    vector<vector<int>> C_block(blockSize, vector<int>(blockSize, 0)); // Result submatrix
+    // Initialize local matrix blocks
+    vector<int> A_block(blockSize * blockSize);
+    vector<int> B_block(blockSize * blockSize);
+    vector<int> C_block(blockSize * blockSize, 0); // Initialize with zeros
 
-    vector<vector<int>> A, B; // Full matrices (only in rank 0)
+    // Temp buffers for shifting
+    vector<int> A_temp(blockSize * blockSize);
+    vector<int> B_temp(blockSize * blockSize);
+
+    // Static buffers to reuse send data
+    static vector<int> A_send(blockSize * blockSize);
+    static vector<int> B_send(blockSize * blockSize);
+
+    vector<int> A, B; // Full matrices only held by rank 0
     if (rank == 0) {
-        A.assign(N, vector<int>(N));
-        B.assign(N, vector<int>(N));
-        fillMatrix(A, N, true);  // Fill A with (i + j)
-        fillMatrix(B, N, false); // Fill B with (i * j)
+        A.resize(N * N);
+        B.resize(N * N);
+        fillMatrix(A, N, true);   // Fill A with i+j
+        fillMatrix(B, N, false);  // Fill B with i*j
 
-        // Distribute blocks to all processes
+        // Send appropriate blocks to each process
         for (int pr = 0; pr < size; ++pr) {
-            int r = pr / q;
-            int c = pr % q;
-            vector<int> A_sub, B_sub;
+            int r = pr / q, c = pr % q;
+            vector<int> A_sub(blockSize * blockSize), B_sub(blockSize * blockSize);
 
-            // Prepare initial shifted blocks for Cannon's algorithm
-            for (int i = 0; i < blockSize; ++i) {
+            // Initial alignment as per Cannon's algorithm
+            for (int i = 0; i < blockSize; ++i)
                 for (int j = 0; j < blockSize; ++j) {
-                    int a_ij = A[r * blockSize + i][(c + q - r) % q * blockSize + j];
-                    int b_ij = B[(r + q - c) % q * blockSize + i][c * blockSize + j];
-                    A_sub.push_back(a_ij);
-                    B_sub.push_back(b_ij);
+                    A_sub[i * blockSize + j] = A[(r * blockSize + i) * N + ((c + q - r) % q * blockSize + j)];
+                    B_sub[i * blockSize + j] = B[((r + q - c) % q * blockSize + i) * N + (c * blockSize + j)];
                 }
-            }
 
             if (pr == 0) {
-                // If process 0, copy data directly
-                for (int i = 0; i < blockSize; ++i)
-                    for (int j = 0; j < blockSize; ++j) {
-                        A_block[i][j] = A_sub[i * blockSize + j];
-                        B_block[i][j] = B_sub[i * blockSize + j];
-                    }
+                A_block = A_sub;
+                B_block = B_sub;
             }
             else {
-                // Otherwise, send to other processes
                 MPI_Send(A_sub.data(), blockSize * blockSize, MPI_INT, pr, 0, MPI_COMM_WORLD);
                 MPI_Send(B_sub.data(), blockSize * blockSize, MPI_INT, pr, 1, MPI_COMM_WORLD);
             }
         }
     }
     else {
-        // Receive blocks from process 0
-        vector<int> A_recv(blockSize * blockSize), B_recv(blockSize * blockSize);
-        MPI_Recv(A_recv.data(), blockSize * blockSize, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        MPI_Recv(B_recv.data(), blockSize * blockSize, MPI_INT, 0, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        for (int i = 0; i < blockSize; ++i)
-            for (int j = 0; j < blockSize; ++j) {
-                A_block[i][j] = A_recv[i * blockSize + j];
-                B_block[i][j] = B_recv[i * blockSize + j];
-            }
+        // Other ranks receive their blocks
+        MPI_Recv(A_block.data(), blockSize * blockSize, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        MPI_Recv(B_block.data(), blockSize * blockSize, MPI_INT, 0, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
     }
 
-    MPI_Barrier(MPI_COMM_WORLD); // Synchronize all processes
-    double start_time = MPI_Wtime(); // Start timing
+    MPI_Barrier(MPI_COMM_WORLD); // Synchronize before timing
+    double start_time = MPI_Wtime();
 
-    // Main Cannon's algorithm
+    // Main loop of Cannon's algorithm
     for (int step = 0; step < q; ++step) {
-        multiplyBlocks(A_block, B_block, C_block, blockSize); // Multiply current blocks
+        multiplyBlocks(A_block, B_block, C_block, blockSize); // Local block multiply
 
-        // Calculate neighbor ranks for shifting
+        // Determine neighbors for circular shift
         int left = (col + q - 1) % q + row * q;
         int right = (col + 1) % q + row * q;
         int up = ((row + q - 1) % q) * q + col;
         int down = ((row + 1) % q) * q + col;
 
-        // Prepare sending buffers
-        vector<int> A_temp(blockSize * blockSize);
-        vector<int> B_temp(blockSize * blockSize);
-        vector<int> A_send, B_send;
-        for (int i = 0; i < blockSize; ++i)
-            for (int j = 0; j < blockSize; ++j) {
-                A_send.push_back(A_block[i][j]);
-                B_send.push_back(B_block[i][j]);
-            }
+        // Copy blocks into send buffers
+        A_send = A_block;
+        B_send = B_block;
 
-        // Shift A left and B up
+        // Perform circular shift (left for A, up for B)
         MPI_Sendrecv(A_send.data(), blockSize * blockSize, MPI_INT, left, 0,
             A_temp.data(), blockSize * blockSize, MPI_INT, right, 0,
             MPI_COMM_WORLD, MPI_STATUS_IGNORE);
@@ -148,53 +133,42 @@ int main(int argc, char** argv) {
             B_temp.data(), blockSize * blockSize, MPI_INT, down, 1,
             MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-        // Update local blocks after shifting
-        for (int i = 0; i < blockSize; ++i)
-            for (int j = 0; j < blockSize; ++j) {
-                A_block[i][j] = A_temp[i * blockSize + j];
-                B_block[i][j] = B_temp[i * blockSize + j];
-            }
+        // Load new shifted data into local blocks
+        A_block = A_temp;
+        B_block = B_temp;
     }
 
-    double end_time = MPI_Wtime(); // End timing
-    double exec_time = end_time - start_time; // Calculate elapsed time
+    double end_time = MPI_Wtime();
+    double exec_time = end_time - start_time;
 
     if (rank == 0) {
-        // Rank 0 gathers the result from all processes
-        vector<vector<int>> result(N, vector<int>(N));
-
-        // Copy own computed block
+        // Gather results into full matrix in rank 0
+        vector<int> result(N * N);
         for (int i = 0; i < blockSize; ++i)
             for (int j = 0; j < blockSize; ++j)
-                result[i][j] = C_block[i][j];
+                result[i * N + j] = C_block[i * blockSize + j];
 
-        // Receive C_blocks from other processes
+        // Collect C blocks from all other processes
         for (int pr = 1; pr < size; ++pr) {
             vector<int> temp(blockSize * blockSize);
             MPI_Recv(temp.data(), blockSize * blockSize, MPI_INT, pr, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            int r = pr / q;
-            int c = pr % q;
+            int r = pr / q, c = pr % q;
             for (int i = 0; i < blockSize; ++i)
                 for (int j = 0; j < blockSize; ++j)
-                    result[r * blockSize + i][c * blockSize + j] = temp[i * blockSize + j];
+                    result[(r * blockSize + i) * N + (c * blockSize + j)] = temp[i * blockSize + j];
         }
 
-        // Print matrices A, B, and C
-        printMatrix(A, "Matrix A");
-        printMatrix(B, "Matrix B");
-        cout << "Result C = A x B:" << endl;
-        printMatrix(result, "C");
+        // Display matrices and performance
+        printMatrix(A, N, "Matrix A");
+        printMatrix(B, N, "Matrix B");
+        printMatrix(result, N, "Result C = A x B");
         cout << "Execution Time: " << exec_time << " seconds" << endl;
     }
     else {
-        // Other processes send their C_blocks to rank 0
-        vector<int> C_send;
-        for (int i = 0; i < blockSize; ++i)
-            for (int j = 0; j < blockSize; ++j)
-                C_send.push_back(C_block[i][j]);
-        MPI_Send(C_send.data(), blockSize * blockSize, MPI_INT, 0, 2, MPI_COMM_WORLD);
+        // Send C block to rank 0
+        MPI_Send(C_block.data(), blockSize * blockSize, MPI_INT, 0, 2, MPI_COMM_WORLD);
     }
 
-    MPI_Finalize(); // Finalize MPI
+    MPI_Finalize();
     return 0;
 }
